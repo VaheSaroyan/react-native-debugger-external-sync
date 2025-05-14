@@ -2,7 +2,7 @@
 
 A powerful debugging tool for React Query state in any React-based application. Whether you're building for mobile, web, desktop, TV, or VR - this package has you covered. It works seamlessly across all platforms where React runs, with zero configuration to disable in production.
 
-Pairs perfectly with [React Native DevTools](https://github.com/LovesWorking/rn-better-dev-tools) for a complete development experience.
+Pairs perfectly with [React Native DevTools](https://github.com/VaheSaroyan/react-native-devtools) for a complete development experience.
 
 ![React Query External Sync Demo](https://github.com/user-attachments/assets/39e5c417-be4d-46af-8138-3589d73fce9f)
 
@@ -108,7 +108,7 @@ if (process.env.NODE_ENV !== "production") {
 
 ## 💡 Usage with DevTools
 
-For the best experience, use this package with the [React Native DevTools](https://github.com/LovesWorking/rn-better-dev-tools) application:
+For the best experience, use this package with the [React Native DevTools](https://github.com/VaheSaroyan/react-native-devtools) application:
 
 1. Download and launch the DevTools application
 2. Integrate this package in your React application
