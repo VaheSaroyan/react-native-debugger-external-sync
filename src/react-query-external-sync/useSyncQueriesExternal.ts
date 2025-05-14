@@ -5,7 +5,22 @@ import { onlineManager, QueryClient } from "@tanstack/react-query";
 import { log } from "./utils/logger";
 import { Dehydrate } from "./hydration";
 import { PlatformOS } from "./platformUtils";
-import { SyncMessage } from "./types";
+import {
+  setupFetchInterceptor,
+  setupXHRInterceptor,
+  setupWebSocketInterceptor
+} from "./sendNetworkRequest";
+import {
+  AsyncStorageActionMessage,
+  AsyncStorageRequestMessage,
+  SyncMessage,
+  AsyncStorageSyncMessage,
+  AsyncStorageState,
+  NetworkRequest,
+  NetworkRequestSyncMessage,
+  NetworkMonitoringActionMessage,
+  NetworkRequestMessage
+} from "./types";
 import { useMySocket } from "./useMySocket";
 
 /**
@@ -41,7 +56,7 @@ interface QueryActionMessage {
   queryKey: QueryKey; // Key array used to identify the query
   data: unknown; // Data payload (if applicable)
   action: QueryActions; // Action to perform
-  deviceId: string; // Device to target
+  targetDeviceId: string; // Device to target
 }
 
 /**
@@ -89,6 +104,29 @@ function checkVersion(queryClient: QueryClient) {
   }
 }
 
+/**
+ * Network monitoring options
+ */
+export interface NetworkMonitoringOptions {
+  /**
+   * Enable fetch API monitoring
+   * @default false
+   */
+  fetch?: boolean;
+
+  /**
+   * Enable XMLHttpRequest monitoring
+   * @default false
+   */
+  xhr?: boolean;
+
+  /**
+   * Enable WebSocket monitoring
+   * @default false
+   */
+  websocket?: boolean;
+}
+
 interface useSyncQueriesExternalProps {
   queryClient: QueryClient;
   deviceName: string;
@@ -107,6 +145,23 @@ interface useSyncQueriesExternalProps {
    * @default false
    */
   enableLogs?: boolean;
+  /**
+   * Optional AsyncStorage implementation for AsyncStorage viewer integration
+   * This should be the AsyncStorage instance from @react-native-async-storage/async-storage
+   */
+  asyncStorage?: {
+    getAllKeys: () => Promise<readonly string[]>;
+    getItem: (key: string) => Promise<string | null>;
+    setItem: (key: string, value: string) => Promise<void>;
+    removeItem: (key: string) => Promise<void>;
+    clear: () => Promise<void>;
+  };
+  /**
+   * Network monitoring options
+   * Configure which network request types to monitor
+   * @default undefined (no monitoring)
+   */
+  networkMonitoring?: NetworkMonitoringOptions;
 }
 
 /**
@@ -126,6 +181,8 @@ export function useSyncQueriesExternal({
   platform,
   deviceId,
   enableLogs = false,
+  asyncStorage,
+  networkMonitoring,
 }: useSyncQueriesExternalProps) {
   // ==========================================================
   // Validate deviceId
@@ -154,8 +211,42 @@ export function useSyncQueriesExternal({
     enableLogs,
   });
 
-  // Use a ref to track previous connection state to avoid duplicate logs
+  // Use refs to track state and cleanup functions
   const prevConnectedRef = useRef(false);
+  const removeFetchInterceptorRef = useRef<(() => void) | null>(null);
+  const removeXHRInterceptorRef = useRef<(() => void) | null>(null);
+  const removeWebSocketInterceptorRef = useRef<(() => void) | null>(null);
+
+  // Helper function to send AsyncStorage state to the dashboard
+  const sendAsyncStorageState = async () => {
+    if (!asyncStorage || !socket || !deviceId) {
+      return;
+    }
+
+    try {
+      const keys = await asyncStorage.getAllKeys();
+      const items = [];
+
+      for (const key of keys) {
+        const value = await asyncStorage.getItem(key);
+        items.push({ key, value: value || '' });
+      }
+
+      const syncMessage: AsyncStorageSyncMessage = {
+        type: "async-storage-state",
+        state: {
+          items,
+          timestamp: Date.now()
+        },
+        persistentDeviceId: deviceId
+      };
+
+      socket.emit('async-storage-sync', syncMessage);
+      log(`${logPrefix} Sent AsyncStorage state to dashboard (${items.length} items)`, enableLogs);
+    } catch (error) {
+      log(`${logPrefix} Error sending AsyncStorage state: ${error}`, enableLogs, "error");
+    }
+  };
 
   useEffect(() => {
     checkVersion(queryClient);
@@ -249,7 +340,7 @@ export function useSyncQueriesExternal({
     const queryActionSubscription = socket.on(
       "query-action",
       (message: QueryActionMessage) => {
-        const { queryHash, queryKey, data, action, deviceId } = message;
+        const { queryHash, queryKey, data, action, targetDeviceId } = message;
         if (!deviceId) {
           log(
             `[${deviceName}] No persistent device ID found`,
@@ -261,7 +352,7 @@ export function useSyncQueriesExternal({
         // Skip if not targeted at this device
         if (
           !shouldProcessMessage({
-            targetDeviceId: deviceId,
+            targetDeviceId: targetDeviceId,
             currentDeviceId: deviceId,
           })
         ) {
@@ -444,15 +535,290 @@ export function useSyncQueriesExternal({
     });
 
     // ==========================================================
-    // Cleanup function to unsubscribe from all events
+    // AsyncStorage handlers - Process AsyncStorage actions from the dashboard
     // ==========================================================
-    return () => {
-      log(`${logPrefix} Cleaning up event listeners`, enableLogs);
-      queryActionSubscription?.off();
-      initialStateSubscription?.off();
-      onlineManagerSubscription?.off();
-      unsubscribe();
-    };
+    const asyncStorageActionSubscription = socket.on(
+      "async-storage-action",
+      async (message: AsyncStorageActionMessage) => {
+        const { action, targetDeviceId, key, value } = message;
+
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+
+        // Skip if not targeted at this device
+        if (
+          !shouldProcessMessage({
+            targetDeviceId: targetDeviceId,
+            currentDeviceId: deviceId,
+          })
+        ) {
+          return;
+        }
+
+        log(
+          `${logPrefix} Received AsyncStorage action: ${action}${key ? ` for key ${key}` : ''}`,
+          enableLogs
+        );
+
+        // If AsyncStorage is provided, handle the action directly
+        if (asyncStorage) {
+          try {
+            switch (action) {
+              case 'GET_ALL_KEYS':
+                await sendAsyncStorageState();
+                break;
+
+              case 'GET_ITEM':
+                if (key) {
+                  const value = await asyncStorage.getItem(key);
+                  log(`${logPrefix} Got AsyncStorage item: ${key} = ${value}`, enableLogs);
+                  // After getting the item, send the full state back
+                  await sendAsyncStorageState();
+                }
+                break;
+
+              case 'SET_ITEM':
+                if (key && value !== undefined) {
+                  await asyncStorage.setItem(key, value);
+                  log(`${logPrefix} Set AsyncStorage item: ${key} = ${value}`, enableLogs);
+                  // After setting the item, send the updated state back
+                  await sendAsyncStorageState();
+                }
+                break;
+
+              case 'REMOVE_ITEM':
+                if (key) {
+                  await asyncStorage.removeItem(key);
+                  log(`${logPrefix} Removed AsyncStorage item: ${key}`, enableLogs);
+                  // After removing the item, send the updated state back
+                  await sendAsyncStorageState();
+                }
+                break;
+
+              case 'CLEAR_ALL':
+                await asyncStorage.clear();
+                log(`${logPrefix} Cleared all AsyncStorage items`, enableLogs);
+                // After clearing all items, send the updated state back
+                await sendAsyncStorageState();
+                break;
+            }
+          } catch (error) {
+            log(`${logPrefix} Error handling AsyncStorage action: ${error}`, enableLogs, "error");
+          }
+        } else {
+          // If AsyncStorage is not provided, emit the event for the app to handle
+          socket.emit("async-storage-action-received", message);
+
+          log(`${logPrefix} Emitted async-storage-action-received event for app to handle`, enableLogs);
+        }
+      }
+    );
+
+    // ==========================================================
+    // Handle AsyncStorage state requests from dashboard
+    // ==========================================================
+    const asyncStorageRequestSubscription = socket.on(
+      "request-async-storage",
+      async (message: AsyncStorageRequestMessage) => {
+        const { targetDeviceId } = message;
+
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+
+        // Skip if not targeted at this device
+        if (
+          !shouldProcessMessage({
+            targetDeviceId: targetDeviceId,
+            currentDeviceId: deviceId,
+          })
+        ) {
+          return;
+        }
+
+        log(`${logPrefix} Dashboard is requesting AsyncStorage state`, enableLogs);
+
+        // If AsyncStorage is provided, handle the request directly
+        if (asyncStorage) {
+          await sendAsyncStorageState();
+        } else {
+          // If AsyncStorage is not provided, emit the event for the app to handle
+          socket.emit("request-async-storage-received", { type: "request-async-storage" });
+
+          log(`${logPrefix} Emitted request-async-storage-received event for app to handle`, enableLogs);
+        }
+      }
+    );
+
+    // ==========================================================
+    // Network Monitoring - Set up interceptors if enabled
+    // ==========================================================
+    if (networkMonitoring) {
+      // Set up fetch interceptor if enabled
+      if (networkMonitoring.fetch) {
+        log(`${logPrefix} Setting up fetch interceptor`, enableLogs);
+        removeFetchInterceptorRef.current = setupFetchInterceptor(socket, deviceId, enableLogs);
+      }
+
+      // Set up XHR interceptor if enabled
+      if (networkMonitoring.xhr) {
+        log(`${logPrefix} Setting up XHR interceptor`, enableLogs);
+        removeXHRInterceptorRef.current = setupXHRInterceptor(socket, deviceId, enableLogs);
+      }
+
+      // Set up WebSocket interceptor if enabled
+      if (networkMonitoring.websocket) {
+        log(`${logPrefix} Setting up WebSocket interceptor`, enableLogs);
+        removeWebSocketInterceptorRef.current = setupWebSocketInterceptor(socket, deviceId, enableLogs);
+      }
+    }
+
+    // ==========================================================
+    // Network Monitoring - Handle network monitoring actions
+    // ==========================================================
+    const networkMonitoringSubscription = socket.on(
+      "network-monitoring-action",
+      (message: NetworkMonitoringActionMessage) => {
+        const { action, targetDeviceId } = message;
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+
+        // Only process if this message targets the current device
+        if (
+          !shouldProcessMessage({
+            targetDeviceId: targetDeviceId,
+            currentDeviceId: deviceId,
+          })
+        ) {
+          return;
+        }
+
+        log(
+          `${logPrefix} Received network-monitoring action: ${action}`,
+          enableLogs
+        );
+
+        switch (action) {
+          case "ACTION-ENABLE-NETWORK-MONITORING": {
+            log(`${logPrefix} Enabling network monitoring`, enableLogs);
+
+            // Set up fetch interceptor if not already set up
+            if (!removeFetchInterceptorRef.current) {
+              removeFetchInterceptorRef.current = setupFetchInterceptor(socket, deviceId, enableLogs);
+            }
+
+            // Set up XHR interceptor if not already set up
+            if (!removeXHRInterceptorRef.current) {
+              removeXHRInterceptorRef.current = setupXHRInterceptor(socket, deviceId, enableLogs);
+            }
+
+            // Set up WebSocket interceptor if not already set up
+            if (!removeWebSocketInterceptorRef.current) {
+              removeWebSocketInterceptorRef.current = setupWebSocketInterceptor(socket, deviceId, enableLogs);
+            }
+            break;
+          }
+          case "ACTION-DISABLE-NETWORK-MONITORING": {
+            log(`${logPrefix} Disabling network monitoring`, enableLogs);
+
+            // Clean up fetch interceptor
+            if (removeFetchInterceptorRef.current) {
+              removeFetchInterceptorRef.current();
+              removeFetchInterceptorRef.current = null;
+            }
+
+            // Clean up XHR interceptor
+            if (removeXHRInterceptorRef.current) {
+              removeXHRInterceptorRef.current();
+              removeXHRInterceptorRef.current = null;
+            }
+
+            // Clean up WebSocket interceptor
+            if (removeWebSocketInterceptorRef.current) {
+              removeWebSocketInterceptorRef.current();
+              removeWebSocketInterceptorRef.current = null;
+            }
+            break;
+          }
+        }
+      }
+    );
+
+    // ==========================================================
+    // Handle network monitoring requests from dashboard
+    // ==========================================================
+    const networkRequestSubscription = socket.on(
+      "request-network-monitoring",
+      (message: NetworkRequestMessage) => {
+        const { targetDeviceId } = message;
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+
+        // Only process if this message targets the current device
+        if (
+          !shouldProcessMessage({
+            targetDeviceId: targetDeviceId,
+            currentDeviceId: deviceId,
+          })
+        ) {
+          return;
+        }
+
+        log(
+          `${logPrefix} Dashboard is requesting network monitoring state`,
+          enableLogs
+        );
+
+        // Your app should implement this functionality to send current network requests
+        // For example: sendCurrentNetworkRequests();
+      }
+    );
+
+
+  // ==========================================================
+  // Cleanup function to unsubscribe from all events
+  // ==========================================================
+  return () => {
+    log(`${logPrefix} Cleaning up event listeners`, enableLogs);
+    queryActionSubscription?.off();
+    initialStateSubscription?.off();
+    onlineManagerSubscription?.off();
+    asyncStorageActionSubscription?.off();
+    asyncStorageRequestSubscription?.off();
+
+    if (networkMonitoringSubscription) {
+      networkMonitoringSubscription.off();
+    }
+
+    if (networkRequestSubscription) {
+      networkRequestSubscription.off();
+    }
+
+    // Clean up network interceptors
+    if (removeFetchInterceptorRef.current) {
+      removeFetchInterceptorRef.current();
+      removeFetchInterceptorRef.current = null;
+    }
+
+    if (removeXHRInterceptorRef.current) {
+      removeXHRInterceptorRef.current();
+      removeXHRInterceptorRef.current = null;
+    }
+
+    if (removeWebSocketInterceptorRef.current) {
+      removeWebSocketInterceptorRef.current();
+      removeWebSocketInterceptorRef.current = null;
+    }
+
+    unsubscribe();
+  };
   }, [
     queryClient,
     socket,
@@ -461,7 +827,14 @@ export function useSyncQueriesExternal({
     deviceId,
     enableLogs,
     logPrefix,
+    asyncStorage,
+    networkMonitoring,
   ]);
 
-  return { connect, disconnect, isConnected, socket };
+  return {
+    connect,
+    disconnect,
+    isConnected,
+    socket,
+  };
 }

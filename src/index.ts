@@ -1,3 +1,5 @@
+import {NetworkMonitoringOptions} from "./react-query-external-sync/useSyncQueriesExternal";
+
 export let useSyncQueriesExternal: typeof import("./react-query-external-sync/useSyncQueriesExternal").useSyncQueriesExternal;
 // @ts-ignore process.env.NODE_ENV is defined by metro transform plugins
 if (process.env.NODE_ENV !== "production") {
@@ -11,5 +13,6 @@ if (process.env.NODE_ENV !== "production") {
     disconnect: () => {},
     socket: null,
     users: [],
+    setupNetworkMonitoring: (_options: NetworkMonitoringOptions) => () => {},
   });
 }
