@@ -1,6 +1,6 @@
 {
   "name": "react-native-devtools-sync",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "A tool for syncing React Query state to an external Dev Tools",
   "main": "dist/bundle.cjs.js",
   "module": "dist/bundle.esm.js",

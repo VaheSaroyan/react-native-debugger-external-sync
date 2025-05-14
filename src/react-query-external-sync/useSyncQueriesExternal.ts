@@ -146,7 +146,11 @@ export interface ExpoDevToolsOptions {
 }
 
 interface useSyncQueriesExternalProps {
-  queryClient: QueryClient;
+  /**
+   * React Query client instance
+   * Optional: If not provided, React Query specific functionality will be disabled
+   */
+  queryClient?: QueryClient;
   deviceName: string;
   /**
    * A unique identifier for this device that persists across app restarts.
@@ -164,10 +168,11 @@ interface useSyncQueriesExternalProps {
    */
   enableLogs?: boolean;
   /**
-   * Optional AsyncStorage implementation for AsyncStorage viewer integration
-   * This should be the AsyncStorage instance from @react-native-async-storage/async-storage
+   * Optional storage implementation for storage viewer integration
+   * Can be AsyncStorage from @react-native-async-storage/async-storage or any custom implementation
+   * that follows the same interface
    */
-  asyncStorage?: {
+  storage?: {
     getAllKeys: () => Promise<readonly string[]>;
     getItem: (key: string) => Promise<string | null>;
     setItem: (key: string, value: string) => Promise<void>;
@@ -205,7 +210,7 @@ export function useSyncQueriesExternal({
   platform,
   deviceId,
   enableLogs = false,
-  asyncStorage,
+  storage,
   networkMonitoring,
 }: useSyncQueriesExternalProps) {
   // ==========================================================
@@ -241,18 +246,18 @@ export function useSyncQueriesExternal({
   const removeXHRInterceptorRef = useRef<(() => void) | null>(null);
   const removeWebSocketInterceptorRef = useRef<(() => void) | null>(null);
 
-  // Helper function to send AsyncStorage state to the dashboard
-  const sendAsyncStorageState = async () => {
-    if (!asyncStorage || !socket || !deviceId) {
+  // Helper function to send storage state to the dashboard
+  const sendStorageState = async () => {
+    if (!storage || !socket || !deviceId) {
       return;
     }
 
     try {
-      const keys = await asyncStorage.getAllKeys();
+      const keys = await storage.getAllKeys();
       const items = [];
 
       for (const key of keys) {
-        const value = await asyncStorage.getItem(key);
+        const value = await storage.getItem(key);
         items.push({ key, value: value || '' });
       }
 
@@ -266,14 +271,17 @@ export function useSyncQueriesExternal({
       };
 
       socket.emit('async-storage-sync', syncMessage);
-      log(`${logPrefix} Sent AsyncStorage state to dashboard (${items.length} items)`, enableLogs);
+      log(`${logPrefix} Sent storage state to dashboard (${items.length} items)`, enableLogs);
     } catch (error) {
-      log(`${logPrefix} Error sending AsyncStorage state: ${error}`, enableLogs, "error");
+      log(`${logPrefix} Error sending storage state: ${error}`, enableLogs, "error");
     }
   };
 
   useEffect(() => {
-    checkVersion(queryClient);
+    // Check React Query version if queryClient is provided
+    if (queryClient) {
+      checkVersion(queryClient);
+    }
 
     // Only log connection state changes to reduce noise
     if (prevConnectedRef.current !== isConnected) {
@@ -295,271 +303,282 @@ export function useSyncQueriesExternal({
     // ==========================================================
 
     // ==========================================================
-    // Handle initial state requests from dashboard
+    // React Query specific event handlers
     // ==========================================================
-    const initialStateSubscription = socket.on("request-initial-state", () => {
-      if (!deviceId) {
-        log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
-        return;
-      }
-      log(`${logPrefix} Dashboard is requesting initial state`, enableLogs);
-      const dehydratedState = Dehydrate(queryClient as unknown as QueryClient);
-      const syncMessage: SyncMessage = {
-        type: "dehydrated-state",
-        state: dehydratedState,
-        isOnlineManagerOnline: onlineManager.isOnline(),
-        persistentDeviceId: deviceId,
-      };
-      socket.emit("query-sync", syncMessage);
-      log(
-        `[${deviceName}] Sent initial state to dashboard (${dehydratedState.queries.length} queries)`,
-        enableLogs
-      );
-    });
+    let initialStateSubscription;
+    let queryActionSubscription;
+    let onlineManagerSubscription;
+    let unsubscribe = () => {}; // Default no-op function
 
-    // ==========================================================
-    // Online manager handler - Handle device internet connection state changes
-    // ==========================================================
-    const onlineManagerSubscription = socket.on(
-      "online-manager",
-      (message: OnlineManagerMessage) => {
-        const { action, targetDeviceId } = message;
+    // Only set up React Query specific handlers if queryClient is provided
+    if (queryClient) {
+      // ==========================================================
+      // Handle initial state requests from dashboard
+      // ==========================================================
+      initialStateSubscription = socket.on("request-initial-state", () => {
         if (!deviceId) {
           log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
           return;
         }
-        // Only process if this message targets the current device
-        if (
-          !shouldProcessMessage({
-            targetDeviceId: targetDeviceId,
-            currentDeviceId: deviceId,
-          })
-        ) {
-          return;
-        }
-
+        log(`${logPrefix} Dashboard is requesting initial state`, enableLogs);
+        const dehydratedState = Dehydrate(queryClient as unknown as QueryClient);
+        const syncMessage: SyncMessage = {
+          type: "dehydrated-state",
+          state: dehydratedState,
+          isOnlineManagerOnline: onlineManager.isOnline(),
+          persistentDeviceId: deviceId,
+        };
+        socket.emit("query-sync", syncMessage);
         log(
-          `[${deviceName}] Received online-manager action: ${action}`,
+          `[${deviceName}] Sent initial state to dashboard (${dehydratedState.queries.length} queries)`,
           enableLogs
         );
+      });
 
-        switch (action) {
-          case "ACTION-ONLINE-MANAGER-ONLINE": {
-            log(`${logPrefix} Set online state: ONLINE`, enableLogs);
-            onlineManager.setOnline(true);
-            break;
+      // ==========================================================
+      // Online manager handler - Handle device internet connection state changes
+      // ==========================================================
+      onlineManagerSubscription = socket.on(
+        "online-manager",
+        (message: OnlineManagerMessage) => {
+          const { action, targetDeviceId } = message;
+          if (!deviceId) {
+            log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+            return;
           }
-          case "ACTION-ONLINE-MANAGER-OFFLINE": {
-            log(`${logPrefix} Set online state: OFFLINE`, enableLogs);
-            onlineManager.setOnline(false);
-            break;
+          // Only process if this message targets the current device
+          if (
+            !shouldProcessMessage({
+              targetDeviceId: targetDeviceId,
+              currentDeviceId: deviceId,
+            })
+          ) {
+            return;
           }
-        }
-      }
-    );
 
-    // ==========================================================
-    // Query Actions handler - Process actions from the dashboard
-    // ==========================================================
-    const queryActionSubscription = socket.on(
-      "query-action",
-      (message: QueryActionMessage) => {
-        const { queryHash, queryKey, data, action, targetDeviceId } = message;
-        if (!deviceId) {
           log(
-            `[${deviceName}] No persistent device ID found`,
-            enableLogs,
-            "warn"
+            `[${deviceName}] Received online-manager action: ${action}`,
+            enableLogs
           );
-          return;
-        }
-        // Skip if not targeted at this device
-        if (
-          !shouldProcessMessage({
-            targetDeviceId: targetDeviceId,
-            currentDeviceId: deviceId,
-          })
-        ) {
-          return;
-        }
 
-        log(
-          `${logPrefix} Received query action: ${action} for query ${queryHash}`,
-          enableLogs
-        );
-        // If action is clear cache do the action here before moving on
-        if (action === "ACTION-CLEAR-MUTATION-CACHE") {
-          queryClient.getMutationCache().clear();
-          log(`${logPrefix} Cleared mutation cache`, enableLogs);
-          return;
-        }
-        if (action === "ACTION-CLEAR-QUERY-CACHE") {
-          queryClient.getQueryCache().clear();
-          log(`${logPrefix} Cleared query cache`, enableLogs);
-          return;
-        }
-
-        const activeQuery = queryClient.getQueryCache().get(queryHash);
-        if (!activeQuery) {
-          log(
-            `${logPrefix} Query with hash ${queryHash} not found`,
-            enableLogs,
-            "warn"
-          );
-          return;
-        }
-
-        switch (action) {
-          case "ACTION-DATA-UPDATE": {
-            log(`${logPrefix} Updating data for query:`, enableLogs);
-            queryClient.setQueryData(queryKey, data, {
-              updatedAt: Date.now(),
-            });
-            break;
-          }
-
-          case "ACTION-TRIGGER-ERROR": {
-            log(`${logPrefix} Triggering error state for query:`, enableLogs);
-            const error = new Error("Unknown error from devtools");
-
-            const __previousQueryOptions = activeQuery.options;
-            activeQuery.setState({
-              status: "error",
-              error,
-              fetchMeta: {
-                ...activeQuery.state.fetchMeta,
-                // @ts-expect-error This does exist
-                __previousQueryOptions,
-              },
-            });
-            break;
-          }
-          case "ACTION-RESTORE-ERROR": {
-            log(
-              `${logPrefix} Restoring from error state for query:`,
-              enableLogs
-            );
-            queryClient.resetQueries(activeQuery);
-            break;
-          }
-          case "ACTION-TRIGGER-LOADING": {
-            if (!activeQuery) return;
-            log(`${logPrefix} Triggering loading state for query:`, enableLogs);
-            const __previousQueryOptions = activeQuery.options;
-            // Trigger a fetch in order to trigger suspense as well.
-            activeQuery.fetch({
-              ...__previousQueryOptions,
-              queryFn: () => {
-                return new Promise(() => {
-                  // Never resolve - simulates perpetual loading
-                });
-              },
-              gcTime: -1,
-            });
-            activeQuery.setState({
-              data: undefined,
-              status: "pending",
-              fetchMeta: {
-                ...activeQuery.state.fetchMeta,
-                // @ts-expect-error This does exist
-                __previousQueryOptions,
-              },
-            });
-            break;
-          }
-          case "ACTION-RESTORE-LOADING": {
-            log(
-              `${logPrefix} Restoring from loading state for query:`,
-              enableLogs
-            );
-            const previousState = activeQuery.state;
-            const previousOptions = activeQuery.state.fetchMeta
-              ? (
-                  activeQuery.state.fetchMeta as unknown as {
-                    __previousQueryOptions: unknown;
-                  }
-                ).__previousQueryOptions
-              : null;
-
-            activeQuery.cancel({ silent: true });
-            activeQuery.setState({
-              ...previousState,
-              fetchStatus: "idle",
-              fetchMeta: null,
-            });
-
-            if (previousOptions) {
-              activeQuery.fetch(previousOptions);
+          switch (action) {
+            case "ACTION-ONLINE-MANAGER-ONLINE": {
+              log(`${logPrefix} Set online state: ONLINE`, enableLogs);
+              onlineManager.setOnline(true);
+              break;
             }
-            break;
-          }
-          case "ACTION-RESET": {
-            log(`${logPrefix} Resetting query:`, enableLogs);
-            queryClient.resetQueries(activeQuery);
-            break;
-          }
-          case "ACTION-REMOVE": {
-            log(`${logPrefix} Removing query:`, enableLogs);
-            queryClient.removeQueries(activeQuery);
-            break;
-          }
-          case "ACTION-REFETCH": {
-            log(`${logPrefix} Refetching query:`, enableLogs);
-            const promise = activeQuery.fetch();
-            promise.catch((error) => {
-              // Log fetch errors but don't propagate them
-              log(
-                `[${deviceName}] Refetch error for ${queryHash}:`,
-                enableLogs,
-                "error"
-              );
-            });
-            break;
-          }
-          case "ACTION-INVALIDATE": {
-            log(`${logPrefix} Invalidating query:`, enableLogs);
-            queryClient.invalidateQueries(activeQuery);
-            break;
-          }
-          case "ACTION-ONLINE-MANAGER-ONLINE": {
-            log(`${logPrefix} Setting online state: ONLINE`, enableLogs);
-            onlineManager.setOnline(true);
-            break;
-          }
-          case "ACTION-ONLINE-MANAGER-OFFLINE": {
-            log(`${logPrefix} Setting online state: OFFLINE`, enableLogs);
-            onlineManager.setOnline(false);
-            break;
+            case "ACTION-ONLINE-MANAGER-OFFLINE": {
+              log(`${logPrefix} Set online state: OFFLINE`, enableLogs);
+              onlineManager.setOnline(false);
+              break;
+            }
           }
         }
-      }
-    );
+      );
+
+      // ==========================================================
+      // Query Actions handler - Process actions from the dashboard
+      // ==========================================================
+      queryActionSubscription = socket.on(
+        "query-action",
+        (message: QueryActionMessage) => {
+          const { queryHash, queryKey, data, action, targetDeviceId } = message;
+          if (!deviceId) {
+            log(
+              `[${deviceName}] No persistent device ID found`,
+              enableLogs,
+              "warn"
+            );
+            return;
+          }
+          // Skip if not targeted at this device
+          if (
+            !shouldProcessMessage({
+              targetDeviceId: targetDeviceId,
+              currentDeviceId: deviceId,
+            })
+          ) {
+            return;
+          }
+
+          log(
+            `${logPrefix} Received query action: ${action} for query ${queryHash}`,
+            enableLogs
+          );
+          // If action is clear cache do the action here before moving on
+          if (action === "ACTION-CLEAR-MUTATION-CACHE") {
+            queryClient.getMutationCache().clear();
+            log(`${logPrefix} Cleared mutation cache`, enableLogs);
+            return;
+          }
+          if (action === "ACTION-CLEAR-QUERY-CACHE") {
+            queryClient.getQueryCache().clear();
+            log(`${logPrefix} Cleared query cache`, enableLogs);
+            return;
+          }
+
+          const activeQuery = queryClient.getQueryCache().get(queryHash);
+          if (!activeQuery) {
+            log(
+              `${logPrefix} Query with hash ${queryHash} not found`,
+              enableLogs,
+              "warn"
+            );
+            return;
+          }
+
+          switch (action) {
+            case "ACTION-DATA-UPDATE": {
+              log(`${logPrefix} Updating data for query:`, enableLogs);
+              queryClient.setQueryData(queryKey, data, {
+                updatedAt: Date.now(),
+              });
+              break;
+            }
+
+            case "ACTION-TRIGGER-ERROR": {
+              log(`${logPrefix} Triggering error state for query:`, enableLogs);
+              const error = new Error("Unknown error from devtools");
+
+              const __previousQueryOptions = activeQuery.options;
+              activeQuery.setState({
+                status: "error",
+                error,
+                fetchMeta: {
+                  ...activeQuery.state.fetchMeta,
+                  // @ts-expect-error This does exist
+                  __previousQueryOptions,
+                },
+              });
+              break;
+            }
+            case "ACTION-RESTORE-ERROR": {
+              log(
+                `${logPrefix} Restoring from error state for query:`,
+                enableLogs
+              );
+              queryClient.resetQueries(activeQuery);
+              break;
+            }
+            case "ACTION-TRIGGER-LOADING": {
+              if (!activeQuery) return;
+              log(`${logPrefix} Triggering loading state for query:`, enableLogs);
+              const __previousQueryOptions = activeQuery.options;
+              // Trigger a fetch in order to trigger suspense as well.
+              activeQuery.fetch({
+                ...__previousQueryOptions,
+                queryFn: () => {
+                  return new Promise(() => {
+                    // Never resolve - simulates perpetual loading
+                  });
+                },
+                gcTime: -1,
+              });
+              activeQuery.setState({
+                data: undefined,
+                status: "pending",
+                fetchMeta: {
+                  ...activeQuery.state.fetchMeta,
+                  // @ts-expect-error This does exist
+                  __previousQueryOptions,
+                },
+              });
+              break;
+            }
+            case "ACTION-RESTORE-LOADING": {
+              log(
+                `${logPrefix} Restoring from loading state for query:`,
+                enableLogs
+              );
+              const previousState = activeQuery.state;
+              const previousOptions = activeQuery.state.fetchMeta
+                ? (
+                    activeQuery.state.fetchMeta as unknown as {
+                      __previousQueryOptions: unknown;
+                    }
+                  ).__previousQueryOptions
+                : null;
+
+              activeQuery.cancel({ silent: true });
+              activeQuery.setState({
+                ...previousState,
+                fetchStatus: "idle",
+                fetchMeta: null,
+              });
+
+              if (previousOptions) {
+                activeQuery.fetch(previousOptions);
+              }
+              break;
+            }
+            case "ACTION-RESET": {
+              log(`${logPrefix} Resetting query:`, enableLogs);
+              queryClient.resetQueries(activeQuery);
+              break;
+            }
+            case "ACTION-REMOVE": {
+              log(`${logPrefix} Removing query:`, enableLogs);
+              queryClient.removeQueries(activeQuery);
+              break;
+            }
+            case "ACTION-REFETCH": {
+              log(`${logPrefix} Refetching query:`, enableLogs);
+              const promise = activeQuery.fetch();
+              promise.catch((error) => {
+                // Log fetch errors but don't propagate them
+                log(
+                  `[${deviceName}] Refetch error for ${queryHash}:`,
+                  enableLogs,
+                  "error"
+                );
+              });
+              break;
+            }
+            case "ACTION-INVALIDATE": {
+              log(`${logPrefix} Invalidating query:`, enableLogs);
+              queryClient.invalidateQueries(activeQuery);
+              break;
+            }
+            case "ACTION-ONLINE-MANAGER-ONLINE": {
+              log(`${logPrefix} Setting online state: ONLINE`, enableLogs);
+              onlineManager.setOnline(true);
+              break;
+            }
+            case "ACTION-ONLINE-MANAGER-OFFLINE": {
+              log(`${logPrefix} Setting online state: OFFLINE`, enableLogs);
+              onlineManager.setOnline(false);
+              break;
+            }
+          }
+        }
+      );
+
+      // ==========================================================
+      // Subscribe to query changes and sync to dashboard
+      // ==========================================================
+      unsubscribe = queryClient.getQueryCache().subscribe(() => {
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+        // Dehydrate the current state
+        const dehydratedState = Dehydrate(queryClient as unknown as QueryClient);
+
+        // Create sync message
+        const syncMessage: SyncMessage = {
+          type: "dehydrated-state",
+          state: dehydratedState,
+          isOnlineManagerOnline: onlineManager.isOnline(),
+          persistentDeviceId: deviceId,
+        };
+
+        // Send message to dashboard
+        socket.emit("query-sync", syncMessage);
+      });
+    }
 
     // ==========================================================
-    // Subscribe to query changes and sync to dashboard
-    // ==========================================================
-    const unsubscribe = queryClient.getQueryCache().subscribe(() => {
-      if (!deviceId) {
-        log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
-        return;
-      }
-      // Dehydrate the current state
-      const dehydratedState = Dehydrate(queryClient as unknown as QueryClient);
-
-      // Create sync message
-      const syncMessage: SyncMessage = {
-        type: "dehydrated-state",
-        state: dehydratedState,
-        isOnlineManagerOnline: onlineManager.isOnline(),
-        persistentDeviceId: deviceId,
-      };
-
-      // Send message to dashboard
-      socket.emit("query-sync", syncMessage);
-    });
-
-    // ==========================================================
-    // AsyncStorage handlers - Process AsyncStorage actions from the dashboard
+    // Storage handlers - Process storage actions from the dashboard
     // ==========================================================
     const asyncStorageActionSubscription = socket.on(
       "async-storage-action",
@@ -582,57 +601,57 @@ export function useSyncQueriesExternal({
         }
 
         log(
-          `${logPrefix} Received AsyncStorage action: ${action}${key ? ` for key ${key}` : ''}`,
+          `${logPrefix} Received storage action: ${action}${key ? ` for key ${key}` : ''}`,
           enableLogs
         );
 
-        // If AsyncStorage is provided, handle the action directly
-        if (asyncStorage) {
+        // If storage is provided, handle the action directly
+        if (storage) {
           try {
             switch (action) {
               case 'GET_ALL_KEYS':
-                await sendAsyncStorageState();
+                await sendStorageState();
                 break;
 
               case 'GET_ITEM':
                 if (key) {
-                  const value = await asyncStorage.getItem(key);
-                  log(`${logPrefix} Got AsyncStorage item: ${key} = ${value}`, enableLogs);
+                  const value = await storage.getItem(key);
+                  log(`${logPrefix} Got storage item: ${key} = ${value}`, enableLogs);
                   // After getting the item, send the full state back
-                  await sendAsyncStorageState();
+                  await sendStorageState();
                 }
                 break;
 
               case 'SET_ITEM':
                 if (key && value !== undefined) {
-                  await asyncStorage.setItem(key, value);
-                  log(`${logPrefix} Set AsyncStorage item: ${key} = ${value}`, enableLogs);
+                  await storage.setItem(key, value);
+                  log(`${logPrefix} Set storage item: ${key} = ${value}`, enableLogs);
                   // After setting the item, send the updated state back
-                  await sendAsyncStorageState();
+                  await sendStorageState();
                 }
                 break;
 
               case 'REMOVE_ITEM':
                 if (key) {
-                  await asyncStorage.removeItem(key);
-                  log(`${logPrefix} Removed AsyncStorage item: ${key}`, enableLogs);
+                  await storage.removeItem(key);
+                  log(`${logPrefix} Removed storage item: ${key}`, enableLogs);
                   // After removing the item, send the updated state back
-                  await sendAsyncStorageState();
+                  await sendStorageState();
                 }
                 break;
 
               case 'CLEAR_ALL':
-                await asyncStorage.clear();
-                log(`${logPrefix} Cleared all AsyncStorage items`, enableLogs);
+                await storage.clear();
+                log(`${logPrefix} Cleared all storage items`, enableLogs);
                 // After clearing all items, send the updated state back
-                await sendAsyncStorageState();
+                await sendStorageState();
                 break;
             }
           } catch (error) {
-            log(`${logPrefix} Error handling AsyncStorage action: ${error}`, enableLogs, "error");
+            log(`${logPrefix} Error handling storage action: ${error}`, enableLogs, "error");
           }
         } else {
-          // If AsyncStorage is not provided, emit the event for the app to handle
+          // If storage is not provided, emit the event for the app to handle
           socket.emit("async-storage-action-received", message);
 
           log(`${logPrefix} Emitted async-storage-action-received event for app to handle`, enableLogs);
@@ -641,7 +660,7 @@ export function useSyncQueriesExternal({
     );
 
     // ==========================================================
-    // Handle AsyncStorage state requests from dashboard
+    // Handle storage state requests from dashboard
     // ==========================================================
     const asyncStorageRequestSubscription = socket.on(
       "request-async-storage",
@@ -663,13 +682,13 @@ export function useSyncQueriesExternal({
           return;
         }
 
-        log(`${logPrefix} Dashboard is requesting AsyncStorage state`, enableLogs);
+        log(`${logPrefix} Dashboard is requesting storage state`, enableLogs);
 
-        // If AsyncStorage is provided, handle the request directly
-        if (asyncStorage) {
-          await sendAsyncStorageState();
+        // If storage is provided, handle the request directly
+        if (storage) {
+          await sendStorageState();
         } else {
-          // If AsyncStorage is not provided, emit the event for the app to handle
+          // If storage is not provided, emit the event for the app to handle
           socket.emit("request-async-storage-received", { type: "request-async-storage" });
 
           log(`${logPrefix} Emitted request-async-storage-received event for app to handle`, enableLogs);
@@ -944,7 +963,7 @@ export function useSyncQueriesExternal({
     deviceId,
     enableLogs,
     logPrefix,
-    asyncStorage,
+    storage,
     networkMonitoring,
   ]);
 
