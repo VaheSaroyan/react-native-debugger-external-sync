@@ -16,18 +16,20 @@ Pairs perfectly with [React Native DevTools](https://github.com/LovesWorking/rn-
 - ⚡️ Simple integration with minimal setup
 - 🧩 Perfect companion to React Native DevTools
 - 🛑 Zero-config production safety - automatically disabled in production builds
+- 🚀 **NEW: Remote Expo DevTools** - Trigger Expo DevTools commands remotely without using the command line
+- 🔧 **Auto-implemented Expo commands** - Default implementations for all Expo DevTools commands with no user setup required
 
 ## 📦 Installation
 
 ```bash
 # Using npm
-npm install --save-dev react-query-external-sync socket.io-client
+npm install --save-dev react-native-devtools-sync socket.io-client
 
 # Using yarn
-yarn add -D react-query-external-sync socket.io-client
+yarn add -D react-native-devtools-sync socket.io-client
 
 # Using pnpm
-pnpm add -D react-query-external-sync socket.io-client
+pnpm add -D react-native-devtools-sync socket.io-client
 ```
 
 ## 🚀 Quick Start
@@ -65,6 +67,18 @@ function AppContent() {
       // Add any relevant platform info
     },
     enableLogs: false,
+    // Enable AsyncStorage monitoring (optional)
+    asyncStorage: AsyncStorage,
+    // Enable network monitoring (optional)
+    networkMonitoring: {
+      fetch: true,
+      xhr: true,
+      websocket: false
+    },
+    // Enable Expo DevTools (optional)
+    expoDevTools: {
+      enabled: true
+    }
   });
 
   // Your app content
@@ -103,19 +117,96 @@ For the best experience, use this package with the [React Native DevTools](https
 
 > **Note**: For optimal connection, launch DevTools before starting your application.
 
+## 🚀 Remote Expo DevTools
+
+This package now includes Remote Expo DevTools, allowing you to trigger Expo DevTools commands remotely without using the command line.
+
+### Setting up Expo DevTools
+
+1. Enable Expo DevTools in your app:
+
+```jsx
+useSyncQueriesExternal({
+  // ... other options
+  expoDevTools: {
+    enabled: true
+  }
+});
+```
+
+2. Command handlers are now automatically implemented:
+
+```jsx
+import { useSyncQueriesExternal } from "react-query-external-sync";
+
+// Simply enable Expo DevTools - no implementation needed!
+useSyncQueriesExternal({
+  // ... other options
+  expoDevTools: {
+    enabled: true
+  }
+});
+```
+
+The library now includes default implementations for all Expo commands that will automatically detect and use the appropriate APIs based on your environment. These implementations will:
+
+- Try to use Expo's APIs first if available
+- Fall back to React Native's DevSettings and NativeModules if needed
+- Provide helpful console messages if no implementation is found
+
+If you need custom behavior, you can still override any command:
+
+```jsx
+import { 
+  setExpoCommandImplementations,
+  useSyncQueriesExternal 
+} from "react-query-external-sync";
+
+// Override only the commands you need custom behavior for
+setExpoCommandImplementations({
+  reload: async () => {
+    console.log("Custom reload implementation");
+    // Your custom implementation
+    await YourCustomReloadFunction();
+  },
+  // You can override just one or a few commands
+  // Other commands will use the default implementations
+});
+```
+
+3. Use the DevTools UI to trigger commands remotely:
+   - Connect to your device
+   - Click the Expo DevTools button in the dashboard
+   - Select a command to execute remotely
+
+### Available Commands
+
+- `reload`: Reload the app
+- `toggle-inspector`: Toggle the element inspector
+- `toggle-performance-monitor`: Toggle the performance monitor
+- `toggle-element-inspector`: Toggle the element inspector
+- `clear-cache`: Clear the app cache
+- `toggle-remote-debugging`: Toggle remote debugging
+- `open-dev-menu`: Open the developer menu
+- `take-screenshot`: Take a screenshot
+- `shake-device`: Simulate device shake
+
 ## ⚙️ Configuration Options
 
 The `useSyncQueriesExternal` hook accepts the following options:
 
-| Option            | Type        | Required | Description                                                             |
-| ----------------- | ----------- | -------- | ----------------------------------------------------------------------- |
-| `queryClient`     | QueryClient | Yes      | Your React Query client instance                                        |
-| `socketURL`       | string      | Yes      | URL of the socket server (e.g., 'http://localhost:42831')               |
-| `deviceName`      | string      | Yes      | Human-readable name for your device                                     |
-| `platform`        | string      | Yes      | Platform identifier ('ios', 'android', 'web', 'macos', 'windows', etc.) |
-| `deviceId`        | string      | Yes      | Unique identifier for your device                                       |
-| `extraDeviceInfo` | object      | No       | Additional device metadata to display in DevTools                       |
-| `enableLogs`      | boolean     | No       | Enable console logging for debugging (default: false)                   |
+| Option              | Type                  | Required | Description                                                             |
+| ------------------- | --------------------- | -------- | ----------------------------------------------------------------------- |
+| `queryClient`       | QueryClient           | Yes      | Your React Query client instance                                        |
+| `socketURL`         | string                | Yes      | URL of the socket server (e.g., 'http://localhost:42831')               |
+| `deviceName`        | string                | Yes      | Human-readable name for your device                                     |
+| `platform`          | string                | Yes      | Platform identifier ('ios', 'android', 'web', 'macos', 'windows', etc.) |
+| `deviceId`          | string                | Yes      | Unique identifier for your device                                       |
+| `extraDeviceInfo`   | object                | No       | Additional device metadata to display in DevTools                       |
+| `enableLogs`        | boolean               | No       | Enable console logging for debugging (default: false)                   |
+| `asyncStorage`      | AsyncStorage          | No       | AsyncStorage implementation for monitoring                              |
+| `networkMonitoring` | NetworkMonitoringOptions | No    | Configure network request monitoring                                    |
+| `expoDevTools`      | ExpoDevToolsOptions   | No       | Configure Expo DevTools integration                                     |
 
 ## 🐛 Troubleshooting
 
@@ -172,10 +263,15 @@ useEffect(() => {
 }, []);
 ```
 
+## 🙏 Acknowledgements
+
+This project is a fork with added features. A huge thank you to [LovesWorking](https://github.com/LovesWorking) for creating the original React Query External Sync package, which provided an excellent foundation for this enhanced version. Your work has been instrumental in making React Query debugging easier and more powerful.
+
 ## 📄 License
 
 MIT
 
 ---
 
-Made with ❤️ by [LovesWorking](https://github.com/LovesWorking)
+Original package by [LovesWorking](https://github.com/LovesWorking)  
+Enhanced with Remote Expo DevTools functionality

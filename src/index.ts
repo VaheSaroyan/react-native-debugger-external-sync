@@ -1,10 +1,11 @@
-import {NetworkMonitoringOptions} from "./react-query-external-sync/useSyncQueriesExternal";
 
 export let useSyncQueriesExternal: typeof import("./react-query-external-sync/useSyncQueriesExternal").useSyncQueriesExternal;
+export let setExpoCommandImplementations: typeof import("./react-query-external-sync/executeExpoCommand").setExpoCommandImplementations;
 // @ts-ignore process.env.NODE_ENV is defined by metro transform plugins
 if (process.env.NODE_ENV !== "production") {
   useSyncQueriesExternal =
     require("./react-query-external-sync/useSyncQueriesExternal").useSyncQueriesExternal;
+    setExpoCommandImplementations = require('./react-query-external-sync/executeExpoCommand').setExpoCommandImplementations;
 } else {
   // In production, this becomes a no-op function
   useSyncQueriesExternal = () => ({
@@ -13,6 +14,6 @@ if (process.env.NODE_ENV !== "production") {
     disconnect: () => {},
     socket: null,
     users: [],
-    setupNetworkMonitoring: (_options: NetworkMonitoringOptions) => () => {},
   });
+    setExpoCommandImplementations = () => {}
 }

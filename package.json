@@ -1,6 +1,6 @@
 {
-  "name": "react-query-external-sync",
-  "version": "2.0.1",
+  "name": "react-native-devtools-sync",
+  "version": "2.0.2",
   "description": "A tool for syncing React Query state to an external Dev Tools",
   "main": "dist/bundle.cjs.js",
   "module": "dist/bundle.esm.js",
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/LovesWorking/react-query-external-sync"
+    "url": "https://github.com/VaheSaroyan/react-native-devtools-sync"
   },
   "keywords": [
     "expo",

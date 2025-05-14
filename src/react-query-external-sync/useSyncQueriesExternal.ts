@@ -21,6 +21,13 @@ import {
   NetworkMonitoringActionMessage,
   NetworkRequestMessage
 } from "./types";
+import {
+  ExpoCommandActionMessage,
+  ExpoCommandResultMessage,
+  ExpoCommand,
+  ExpoDevToolsRequestMessage
+} from "./expoDevToolsTypes";
+import { executeExpoCommand } from "./executeExpoCommand";
 import { useMySocket } from "./useMySocket";
 
 /**
@@ -127,6 +134,17 @@ export interface NetworkMonitoringOptions {
   websocket?: boolean;
 }
 
+/**
+ * Expo DevTools options
+ */
+export interface ExpoDevToolsOptions {
+  /**
+   * Enable Expo DevTools integration
+   * @default false
+   */
+  enabled?: boolean;
+}
+
 interface useSyncQueriesExternalProps {
   queryClient: QueryClient;
   deviceName: string;
@@ -162,6 +180,12 @@ interface useSyncQueriesExternalProps {
    * @default undefined (no monitoring)
    */
   networkMonitoring?: NetworkMonitoringOptions;
+  /**
+   * Expo DevTools options
+   * Configure Expo DevTools integration
+   * @default undefined (no Expo DevTools integration)
+   */
+  expoDevTools?: ExpoDevToolsOptions;
 }
 
 /**
@@ -781,6 +805,91 @@ export function useSyncQueriesExternal({
       }
     );
 
+    // ==========================================================
+    // Handle Expo command actions from the dashboard
+    // ==========================================================
+    const expoCommandActionSubscription = socket.on(
+      "expo-command-action",
+      async (message: ExpoCommandActionMessage) => {
+        const { command, targetDeviceId, commandId } = message;
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+
+        // Only process if this message targets the current device
+        if (
+          !shouldProcessMessage({
+            targetDeviceId: targetDeviceId,
+            currentDeviceId: deviceId,
+          })
+        ) {
+          return;
+        }
+
+        log(
+          `${logPrefix} Received Expo command action: ${command} (ID: ${commandId})`,
+          enableLogs
+        );
+
+        // Create a command object
+        const expoCommand: ExpoCommand = {
+          id: commandId,
+          type: command,
+          status: 'pending',
+          timestamp: Date.now(),
+          deviceId: targetDeviceId,
+        };
+
+        // Execute the command
+        await executeExpoCommand(expoCommand, socket, deviceId, enableLogs);
+      }
+    );
+
+    // ==========================================================
+    // Handle Expo DevTools status requests from dashboard
+    // ==========================================================
+    const expoDevToolsRequestSubscription = socket.on(
+      "request-expo-devtools-status",
+      (message: ExpoDevToolsRequestMessage) => {
+        const { targetDeviceId } = message;
+        if (!deviceId) {
+          log(`${logPrefix} No persistent device ID found`, enableLogs, "warn");
+          return;
+        }
+
+        // Only process if this message targets the current device
+        if (
+          !shouldProcessMessage({
+            targetDeviceId: targetDeviceId,
+            currentDeviceId: deviceId,
+          })
+        ) {
+          return;
+        }
+
+        log(
+          `${logPrefix} Dashboard is requesting Expo DevTools status`,
+          enableLogs
+        );
+
+        // Send a success response to indicate that Expo DevTools is available
+        const resultMessage: ExpoCommandResultMessage = {
+          type: 'expo-command-result',
+          command: {
+            id: 'status-check',
+            type: 'reload', // Doesn't matter for status check
+            status: 'success',
+            timestamp: Date.now(),
+            deviceId: targetDeviceId,
+            result: { expoDevToolsAvailable: true },
+          },
+          persistentDeviceId: deviceId,
+        };
+
+        socket.emit('expo-command-result', resultMessage);
+      }
+    );
 
   // ==========================================================
   // Cleanup function to unsubscribe from all events
@@ -799,6 +908,14 @@ export function useSyncQueriesExternal({
 
     if (networkRequestSubscription) {
       networkRequestSubscription.off();
+    }
+
+    if (expoCommandActionSubscription) {
+      expoCommandActionSubscription.off();
+    }
+
+    if (expoDevToolsRequestSubscription) {
+      expoDevToolsRequestSubscription.off();
     }
 
     // Clean up network interceptors
